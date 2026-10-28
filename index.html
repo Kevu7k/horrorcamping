@@ -11,15 +11,21 @@ canvas{display:block;width:100%;height:100%;image-rendering:pixelated;image-rend
 #msg{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;color:var(--fg);background:rgba(0,0,0,.6);text-align:center;cursor:pointer;padding:16px;box-sizing:border-box}
 #msg b{font-size:26px;font-weight:normal;letter-spacing:.04em}
 #msg small{opacity:.7;margin-top:10px;font-size:14px;line-height:1.5}
+#hud{position:fixed;top:max(12px,env(safe-area-inset-top));left:12px;color:#f2eee2;background:rgba(0,0,0,.45);padding:8px 12px;font-size:14px;line-height:1.5;border-radius:4px;pointer-events:none}
+#bar{position:fixed;top:max(12px,env(safe-area-inset-top));right:12px;width:140px;height:10px;background:rgba(0,0,0,.5);border-radius:5px;overflow:hidden;pointer-events:none}
+#bar i{display:block;height:100%;width:100%;background:#f0b44a}
+#hint{position:fixed;bottom:12%;left:0;right:0;text-align:center;color:#fff;font-size:18px;text-shadow:0 1px 3px #000;pointer-events:none}
+#toast{position:fixed;top:22%;left:0;right:0;text-align:center;color:#fff;font-size:20px;text-shadow:0 1px 4px #000;opacity:0;transition:opacity .6s;pointer-events:none;padding:0 16px}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="msg"><b>Clique para entrar na floresta</b><small>W A S D para andar · Shift corre<br>mouse para olhar (ou arraste) · setas também olham · Esc pausa</small></div>
+<div id="hud"></div><div id="bar"><i></i></div><div id="hint"></div><div id="toast"></div>
+<div id="msg"><b>Clique para entrar na floresta</b><small>W A S D para andar · Shift corre · F lanterna · E interagir<br>mouse para olhar (ou arraste) · setas também olham · Esc pausa<br>Objetivo: monte a barraca e acenda a fogueira antes de anoitecer</small></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 const canvas = document.getElementById('c'), msg = document.getElementById('msg');
-const SCALE = 2; // quanto maior, mais pixelado (visual PS2)
+const SCALE = 1; // quanto maior, mais pixelado (visual PS2)
 const FOG = 0x0a0f1a;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
@@ -51,12 +57,19 @@ function tex(base, noise, rep) {
   t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rep, rep);
   return t;
 }
-const mat = (base, noise, rep = 1) => new THREE.MeshLambertMaterial({ map: tex(base, noise, rep) });
+// Phong sem brilho: a luz é calculada por pixel, necessário para a lanterna aparecer no chão
+const mat = (base, noise, rep = 1) => new THREE.MeshPhongMaterial({ map: tex(base, noise, rep), specular: 0x000000, shininess: 0 });
 
 // Luzes
-scene.add(new THREE.AmbientLight(0x2a3a55, 0.55));
-const moon = new THREE.DirectionalLight(0x7088b0, 0.4); moon.position.set(-30, 50, -40); scene.add(moon);
-const fireLight = new THREE.PointLight(0xff8a3a, 1.6, 16, 2); fireLight.position.set(0, 1.1, 0); scene.add(fireLight);
+const ambient = new THREE.AmbientLight(0x2a3a55, 0.22); scene.add(ambient);
+const moon = new THREE.DirectionalLight(0x7088b0, 0.22); moon.position.set(-30, 50, -40); scene.add(moon);
+const fireLight = new THREE.PointLight(0xff8a3a, 0, 16, 2); fireLight.position.set(0, 1.1, 0); scene.add(fireLight);
+
+// Lanterna presa à câmera (tecla F liga/desliga)
+const torch = new THREE.SpotLight(0xfff0c8, 2.4, 32, Math.PI / 7, 0.5, 1.4);
+torch.position.set(0.25, -0.2, 0);
+torch.target.position.set(0, 0, -6);
+camera.add(torch, torch.target); scene.add(camera);
 
 // Chão
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(220, 220), mat([72, 56, 40], 34, 70));
@@ -75,9 +88,31 @@ for (let i = 0; i < 150; i++) {
   tree.position.set(x, 0, z); tree.scale.setScalar(k); tree.rotation.y = Math.random() * 6; scene.add(tree);
 }
 
-// Barraca
-const tent = new THREE.Mesh(new THREE.ConeGeometry(2.3, 2.1, 4), mat([140, 110, 62], 24));
-tent.position.set(-4.2, 1.05, -3); tent.rotation.y = Math.PI / 4 + 0.3; tent.scale.z = 1.5; scene.add(tent);
+// Barraca entrável (começa escondida; aparece quando montada)
+const TENT = { x: -5, z: -3, w: 2.4, l: 3, h: 2.1, rot: Math.atan2(5, 3) };
+const tent = new THREE.Group(), tentM = mat([140, 110, 62], 24);
+tentM.side = THREE.DoubleSide;
+const hw = TENT.w / 2, hl = TENT.l / 2, dh = TENT.h * (1 - 0.5 / hw);
+const slope = Math.hypot(hw, TENT.h), ang = Math.atan2(TENT.h, hw);
+for (const s of [-1, 1]) { // as duas laterais inclinadas
+  const g = new THREE.PlaneGeometry(slope, TENT.l); g.rotateX(-Math.PI / 2);
+  const p = new THREE.Mesh(g, tentM); p.rotation.z = -s * ang; p.position.set(s * hw / 2, TENT.h / 2, 0); tent.add(p);
+}
+function tri(pts, z) {
+  const sh = new THREE.Shape(); sh.moveTo(...pts[0]); sh.lineTo(...pts[1]); sh.lineTo(...pts[2]);
+  const m = new THREE.Mesh(new THREE.ShapeGeometry(sh), tentM); m.position.z = z; tent.add(m);
+}
+tri([[-hw, 0], [hw, 0], [0, TENT.h]], -hl);   // fundo
+tri([[-hw, 0], [-0.5, 0], [-0.5, dh]], hl);   // frente, lado esquerdo (a porta fica no meio)
+tri([[hw, 0], [0.5, 0], [0.5, dh]], hl);      // frente, lado direito
+const tfloor = new THREE.Mesh(new THREE.PlaneGeometry(TENT.w, TENT.l), mat([60, 50, 40], 20));
+tfloor.rotation.x = -Math.PI / 2; tfloor.position.y = 0.03; tent.add(tfloor);
+const bag = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.14, 1.7), mat([40, 60, 110], 24));
+bag.position.set(0.3, 0.1, -0.3); tent.add(bag); // saco de dormir
+tent.position.set(TENT.x, 0, TENT.z); tent.rotation.y = TENT.rot; tent.scale.setScalar(0.01); tent.visible = false; scene.add(tent);
+// Marcação no chão do lugar da barraca
+const spot = new THREE.Mesh(new THREE.RingGeometry(1.5, 1.7, 24).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xe8d9a0, fog: false }));
+spot.position.set(TENT.x, 0.04, TENT.z); scene.add(spot);
 
 // Fogueira: pedras, lenha e chamas
 const stoneM = mat([90, 90, 94], 40), stoneG = new THREE.BoxGeometry(0.34, 0.24, 0.34);
@@ -86,14 +121,15 @@ for (let i = 0; i < 9; i++) {
   s.position.set(Math.cos(a) * 0.8, 0.12, Math.sin(a) * 0.8); s.rotation.y = a * 3; scene.add(s);
 }
 const logG = new THREE.CylinderGeometry(0.09, 0.09, 1.1, 5), logM = mat([70, 46, 30], 24);
+const fireLogs = [];
 for (let i = 0; i < 3; i++) {
   const lg = new THREE.Mesh(logG, logM); lg.rotation.z = Math.PI / 2; lg.rotation.y = i * 1.05;
-  lg.position.y = 0.2; scene.add(lg);
+  lg.position.y = 0.2; lg.visible = false; fireLogs.push(lg); scene.add(lg);
 }
 const flame = new THREE.Mesh(new THREE.ConeGeometry(0.38, 1, 5), new THREE.MeshBasicMaterial({ color: 0xff8a2a, fog: false }));
-flame.position.y = 0.65; scene.add(flame);
+flame.position.y = 0.65; flame.visible = false; scene.add(flame);
 const core = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.6, 5), new THREE.MeshBasicMaterial({ color: 0xffd25a, fog: false }));
-core.position.y = 0.5; scene.add(core);
+core.position.y = 0.5; core.visible = false; scene.add(core);
 // Troncos para sentar
 for (const [x, z, r] of [[2.4, 0.4, 0.2], [0.6, 2.5, 1.5]]) {
   const b = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 1.8, 6), logM);
@@ -109,11 +145,16 @@ for (let i = 0; i < 260; i++) {
   sp.push(Math.cos(a) * Math.cos(e) * R, Math.sin(e) * R, Math.sin(a) * Math.cos(e) * R);
 }
 const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
-scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xdde6ff, size: 2, sizeAttenuation: false, fog: false })));
+const starM = new THREE.PointsMaterial({ color: 0xdde6ff, size: 2, sizeAttenuation: false, fog: false, transparent: true });
+scene.add(new THREE.Points(sg, starM));
 
 // Controles
 const keys = {};
-addEventListener('keydown', e => keys[e.code] = true);
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'KeyF' && !e.repeat) torch.visible = !torch.visible;
+  if (e.code === 'KeyE' && !e.repeat && playing) interact();
+});
 addEventListener('keyup', e => keys[e.code] = false);
 let yaw = Math.atan2(4, 6), pitch = 0, playing = false, locked = false, dragging = false;
 const pos = { x: 4, z: 6 };
@@ -132,11 +173,92 @@ addEventListener('mousemove', e => { if (locked) look(e.movementX, e.movementY);
 canvas.addEventListener('mousedown', () => dragging = true);
 addEventListener('mouseup', () => dragging = false);
 
+// ---------- Objetivos, dia/noite e interação ----------
+const DAY_LEN = 240; // segundos até anoitecer de vez (mude aqui para facilitar/dificultar)
+const hud = document.getElementById('hud'), bar = document.querySelector('#bar i'),
+      hint = document.getElementById('hint'), toastEl = document.getElementById('toast');
+let gt = 0, eyeH = 1.7, wood = 0, pieces = 0, stacked = false, fireLit = false, tentBuilt = false, buildT = 0, ended = false, nightWarned = false;
+function toast(s) { toastEl.textContent = s; toastEl.style.opacity = 1; clearTimeout(toast.h); toast.h = setTimeout(() => toastEl.style.opacity = 0, 4500); }
+function updateHud() {
+  hud.innerHTML = `Barraca: ${tentBuilt ? 'montada ✓' : pieces + '/5 peças'}<br>Lenha: ${stacked ? 'pronta ✓' : wood + '/3'}<br>Fogueira: ${fireLit ? 'acesa ✓' : 'apagada'}`;
+}
+updateHud();
+
+// Ciclo do dia: céu, névoa e luzes mudam de cor
+const C = h => new THREE.Color(h), dayC = C(0x8fb8e0), duskC = C(0xd9805a), nightC = C(0x0a0f1a), sunC = C(0xfff0d0), moonC = C(0x7088b0), tmp = new THREE.Color();
+function applyDay(p) {
+  if (p < 0.7) tmp.lerpColors(dayC, duskC, p / 0.7); else tmp.lerpColors(duskC, nightC, (p - 0.7) / 0.3);
+  scene.background.copy(tmp); scene.fog.color.copy(tmp);
+  scene.fog.near = 10 - 6 * p; scene.fog.far = 80 - 42 * p;
+  ambient.intensity = 0.85 - 0.63 * p; moon.intensity = 0.9 - 0.68 * p; moon.color.lerpColors(sunC, moonC, p);
+  starM.opacity = Math.max(0, (p - 0.8) * 5); moonMesh.visible = p > 0.75;
+  bar.style.width = (100 - p * 100) + '%';
+}
+
+// Peças da barraca (1 lona + 4 estacas) e lenha (3), espalhadas pela clareira
+const items = [];
+function addItem(kind, geo, color, x, z) {
+  const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color }));
+  m.position.set(x, 0.3, z); m.rotation.set(0, Math.random() * 6, kind === 'lona' ? 0 : Math.PI / 2); scene.add(m);
+  items.push({ kind: kind === 'wood' ? 'wood' : 'piece', m, taken: false });
+}
+function spawn(n, f) { for (let i = 0; i < n; i++) { const a = Math.random() * 6.283, r = 7 + Math.random() * 16; f(Math.cos(a) * r, Math.sin(a) * r); } }
+spawn(1, (x, z) => addItem('lona', new THREE.BoxGeometry(0.7, 0.18, 0.5), 0xd9b36a, x, z));
+spawn(4, (x, z) => addItem('estaca', new THREE.CylinderGeometry(0.04, 0.04, 0.7, 5), 0xece4c8, x, z));
+spawn(3, (x, z) => addItem('wood', new THREE.CylinderGeometry(0.1, 0.1, 0.9, 5), 0xa0703c, x, z));
+
+function near(x, z, r) { return Math.hypot(pos.x - x, pos.z - z) < r; }
+function target() {
+  for (const it of items) if (!it.taken && near(it.m.position.x, it.m.position.z, 2)) return { t: 'item', it, msg: it.kind === 'wood' ? 'E: pegar lenha' : 'E: pegar peça da barraca' };
+  if (!tentBuilt && near(TENT.x, TENT.z, 3.4)) return { t: 'tent', msg: pieces === 5 ? 'E: montar a barraca' : 'Faltam peças da barraca (' + pieces + '/5)' };
+  if (!fireLit && near(0, 0, 3)) return { t: 'fire', msg: !stacked ? (wood === 3 ? 'E: empilhar a lenha' : 'Faltam gravetos (' + wood + '/3)') : 'E: acender a fogueira' };
+  return null;
+}
+function interact() {
+  const g = target(); if (!g) return;
+  if (g.t === 'item') { g.it.taken = true; g.it.m.visible = false; g.it.kind === 'wood' ? wood++ : pieces++; }
+  else if (g.t === 'tent' && pieces === 5) { tentBuilt = true; tent.visible = true; spot.visible = false; }
+  else if (g.t === 'fire') {
+    if (!stacked && wood === 3) { stacked = true; fireLogs.forEach(l => l.visible = true); }
+    else if (stacked) { fireLit = true; flame.visible = core.visible = true; }
+  }
+  updateHud();
+  if (!ended && tentBuilt && fireLit) { ended = true; toast(gt < DAY_LEN ? 'Tudo pronto antes da noite. Agora é esperar o que vem... 🔥' : 'Você conseguiu, mas a noite já chegou...'); }
+}
+
+// Colisão simples: as paredes da barraca (a porta fica livre) e um corredor central baixo
+const cs = Math.cos(TENT.rot), sn = Math.sin(TENT.rot);
+const W = (x, z) => [TENT.x + x * cs + z * sn, TENT.z - x * sn + z * cs];
+const segs = [[-hw, -hl, -hw, hl], [hw, -hl, hw, hl], [-hw, -hl, hw, -hl], [-hw, hl, -0.5, hl], [0.5, hl, hw, hl], [-0.65, -hl, -0.65, hl], [0.65, -hl, 0.65, hl]].map(s => [...W(s[0], s[1]), ...W(s[2], s[3])]);
+function collideTent() {
+  if (!tentBuilt || buildT < 1) return;
+  for (const [ax, az, bx, bz] of segs) {
+    const dx = bx - ax, dz = bz - az, k = Math.max(0, Math.min(1, ((pos.x - ax) * dx + (pos.z - az) * dz) / (dx * dx + dz * dz)));
+    const cx = ax + dx * k, cz = az + dz * k, ex = pos.x - cx, ez = pos.z - cz, dd = Math.hypot(ex, ez);
+    if (dd < 0.35 && dd > 0.0001) { pos.x = cx + ex / dd * 0.35; pos.z = cz + ez / dd * 0.35; }
+  }
+}
+// Altura dos olhos: dentro da barraca a câmera abaixa
+function targetEye() {
+  const dx = pos.x - TENT.x, dz = pos.z - TENT.z, lx = dx * cs - dz * sn, lz = dx * sn + dz * cs;
+  if (!tentBuilt || Math.abs(lx) > hw || Math.abs(lz) > hl) return 1.7;
+  return Math.max(0.7, Math.min(1.15, TENT.h * (1 - Math.abs(lx) / hw) - 0.2));
+}
+function tick(dt) {
+  const g = target(), txt = playing && g ? g.msg : '';
+  if (hint.textContent !== txt) hint.textContent = txt;
+  for (const it of items) if (!it.taken) it.m.position.y = 0.2 + Math.sin(t * 2 + it.m.position.x) * 0.06;
+  if (tentBuilt && buildT < 1) { buildT = Math.min(1, buildT + dt * 1.2); tent.scale.setScalar(0.01 + 0.99 * (1 - Math.pow(1 - buildT, 3))); }
+  if (gt >= DAY_LEN && !nightWarned && !ended) { nightWarned = true; toast('A noite chegou e o acampamento ainda não está pronto...'); }
+}
+
 // Loop
 let last = performance.now(), t = 0, bob = 0;
 function loop(now) {
   requestAnimationFrame(loop);
   const dt = Math.min(0.05, (now - last) / 1000); last = now; t += dt;
+  if (playing) gt += dt;
+  applyDay(Math.min(1, gt / DAY_LEN));
   if (playing) {
     yaw += ((keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0)) * 1.8 * dt;
     pitch = clampPitch(pitch + ((keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0)) * 1.2 * dt);
@@ -150,10 +272,14 @@ function loop(now) {
     const d = Math.hypot(pos.x, pos.z);
     if (d > 75) { pos.x *= 75 / d; pos.z *= 75 / d; }           // limite do mapa
     if (d < 1.3) { pos.x *= 1.3 / (d || 1); pos.z *= 1.3 / (d || 1); } // não entra na fogueira
+    collideTent();
   }
-  camera.position.set(pos.x, 1.7 + Math.sin(bob) * 0.04, pos.z);
+  eyeH += (targetEye() - eyeH) * Math.min(1, dt * 6);
+  camera.position.set(pos.x, eyeH + Math.sin(bob) * 0.04, pos.z);
+  tick(dt);
   camera.rotation.set(pitch, yaw, 0);
-  fireLight.intensity = 1.5 + Math.sin(t * 21) * 0.2 + Math.random() * 0.3;
+  torch.position.set(0.25 + Math.sin(bob * 0.5) * 0.02, -0.2 + Math.sin(bob) * 0.015, 0); // balanço leve ao andar
+  fireLight.intensity = fireLit ? 1.5 + Math.sin(t * 21) * 0.2 + Math.random() * 0.3 : 0;
   flame.scale.set(1, 1 + Math.sin(t * 14) * 0.15 + Math.random() * 0.1, 1);
   core.scale.y = 1 + Math.sin(t * 18) * 0.2;
   renderer.render(scene, camera);
